@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Export sums, counters and histograms with delta temporality. Each data point was already the change
+  during its own interval, but was labelled cumulative, so backends that trust the label miscounted.
+  Consecutive delta points now join up (one interval ends where the next starts). Queries and
+  dashboards built on the old label may need checking after upgrading.
+
 ## [0.3.6] - 2025-04-08
 
 - Fix protobuf encoding of `:logger.report()` events

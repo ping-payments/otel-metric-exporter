@@ -212,13 +212,10 @@ defmodule OtelMetricExporter.MetricStore do
     current_gen = :persistent_term.get(generation_key(state.metrics_table))
     :persistent_term.put(generation_key(state.metrics_table), current_gen + 1)
 
-    :ets.update_element(
-      state.generations_table,
-      current_gen,
-      {3, System.system_time(:nanosecond)}
-    )
-
-    :ets.insert(state.generations_table, {current_gen + 1, System.system_time(:nanosecond), nil})
+    # Delta points must join up: one interval ends where the next one starts.
+    now = System.system_time(:nanosecond)
+    :ets.update_element(state.generations_table, current_gen, {3, now})
+    :ets.insert(state.generations_table, {current_gen + 1, now, nil})
 
     current_gen
   end
@@ -297,7 +294,7 @@ defmodule OtelMetricExporter.MetricStore do
              value: convert_value(value, :int)
            }
          end),
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE,
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_DELTA,
        is_monotonic: true
      }}
   end
@@ -314,7 +311,7 @@ defmodule OtelMetricExporter.MetricStore do
              value: convert_value(value, :int)
            }
          end),
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE,
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_DELTA,
        is_monotonic: false
      }}
   end
@@ -367,7 +364,7 @@ defmodule OtelMetricExporter.MetricStore do
              max: max_value && max_value / 1
            }
          end),
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_DELTA
      }}
   end
 

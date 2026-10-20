@@ -224,6 +224,61 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 0) == metrics
     end
 
+    test "exports sums, counters and histograms as per-interval deltas", %{
+      bypass: bypass,
+      store_config: config
+    } do
+      metrics = [
+        Metrics.sum("test.sum"),
+        Metrics.counter("test.counter"),
+        Metrics.distribution("test.distribution")
+      ]
+
+      [sum, counter, distribution] = metrics
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: metrics}})
+      test_pid = self()
+
+      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:exported, ExportMetricsServiceRequest.decode(body)})
+        Plug.Conn.resp(conn, 200, "")
+      end)
+
+      MetricStore.write_metric(@name, sum, 5, tags)
+      MetricStore.write_metric(@name, counter, 1, tags)
+      MetricStore.write_metric(@name, distribution, 4, tags)
+      assert :ok = MetricStore.export_sync(@name)
+      assert_receive {:exported, first}
+
+      MetricStore.write_metric(@name, sum, 2, tags)
+      MetricStore.write_metric(@name, counter, 1, tags)
+      MetricStore.write_metric(@name, distribution, 4, tags)
+      assert :ok = MetricStore.export_sync(@name)
+      assert_receive {:exported, second}
+
+      for metric <- exported_metrics(first) ++ exported_metrics(second) do
+        {_kind, data} = metric.data
+        assert data.aggregation_temporality == :AGGREGATION_TEMPORALITY_DELTA
+      end
+
+      assert %{
+               "test.sum" => [{:as_int, 5}],
+               "test.counter" => [{:as_int, 1}],
+               "test.distribution" => [1]
+             } =
+               values_by_name(first)
+
+      assert %{
+               "test.sum" => [{:as_int, 2}],
+               "test.counter" => [{:as_int, 1}],
+               "test.distribution" => [1]
+             } =
+               values_by_name(second)
+
+      assert end_time(first) == start_time(second)
+    end
+
     test "preserves metrics across generations on failed exports", %{
       bypass: bypass,
       store_config: config
@@ -250,7 +305,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         metrics = ExportMetricsServiceRequest.decode(body)
 
-        # Verify that we have one metric with sum = 3 (1 from first generation + 2 from second)
+        # Two delta points, one per generation: 1 and 2
         assert [%{scope_metrics: [%{metrics: [metric]}]}] = metrics.resource_metrics
 
         assert {:sum, %{data_points: [point1, point2]}} = metric.data
@@ -258,7 +313,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
         assert {:as_int, 2} = point2.value
 
         assert point1.time_unix_nano < point2.time_unix_nano
-        assert point2.start_time_unix_nano > point1.time_unix_nano
+        assert point2.start_time_unix_nano == point1.time_unix_nano
 
         Plug.Conn.resp(conn, 200, "")
       end)
@@ -270,4 +325,25 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 1) == %{}
     end
   end
+
+  defp exported_metrics(%ExportMetricsServiceRequest{
+         resource_metrics: [%{scope_metrics: [%{metrics: metrics}]}]
+       }),
+       do: metrics
+
+  defp values_by_name(export),
+    do: export |> exported_metrics() |> Map.new(&{&1.name, values(&1.data)})
+
+  defp start_time(export), do: export |> first_point() |> Map.fetch!(:start_time_unix_nano)
+  defp end_time(export), do: export |> first_point() |> Map.fetch!(:time_unix_nano)
+
+  defp first_point(export) do
+    {_kind, %{data_points: [point | _]}} =
+      export |> exported_metrics() |> List.first() |> Map.fetch!(:data)
+
+    point
+  end
+
+  defp values({:histogram, %{data_points: points}}), do: Enum.map(points, & &1.count)
+  defp values({:sum, %{data_points: points}}), do: Enum.map(points, & &1.value)
 end
